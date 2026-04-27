@@ -107,7 +107,12 @@ const unsigned char lut_grayscale_revert[] PROGMEM = {
     // Reserved
     0x00, 0x00};
 
-// X3 reverse-exact full refresh LUTs (42 bytes each)
+// X3 differential BW page-turn LUTs — community-authored.
+// Required because loading the OEM img bank for full-sync/grayscale leaves
+// absolute-mode waveforms in the controller's LUT registers. Subsequent
+// fast-diff triggers reuse those registers, producing grey overlay artifacts.
+// Loading this bank before fast-diff overwrites the absolute waveforms with
+// differential B→W / W→B transitions, restoring clean page turns.
 const uint8_t lut_x3_vcom_full[] PROGMEM = {
     0x00, 0x06, 0x02, 0x06, 0x06, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -129,40 +134,52 @@ const uint8_t lut_x3_bb_full[] PROGMEM = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// X3 dedicated grayscale LUTs — tuned drive strengths for 4-level gray
-// All entries share the same single-phase timing so the controller scans
-// every row with consistent gate timing. Source voltages differ per transition:
-//   VCOM: GND (stable common electrode reference)
-//   BB:   GND (active hold — prevents floating source crosstalk)
-//   WW:   brief VDL pulse (dark gray)
-//   BW:   moderate VDL pulse (light gray)
-//   WB:   GND (active hold — unused transition)
+// X3 differential grayscale LUTs — mechanical port of the X4 lut_grayscale
+// VS patterns into the X3's 5-cell bank format. Used for text-only AA pages
+// where the BW content is already on screen and grey levels overlay it.
+// GRAYSCALE encoding cell mapping: BB=no change, WW=dark gray, BW=medium gray.
+// WB is never selected by GRAYSCALE encoding but populated with state 01
+// (light gray) for completeness.
 const uint8_t lut_x3_vcom_gray[] PROGMEM = {
     0x00, 0x03, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 const uint8_t lut_x3_ww_gray[] PROGMEM = {
-    // Dark gray: VS=0x20 → GND,VDL(2),GND,GND — brief pulse (sub-phase B)
+    // State 11 (dark gray): single phase, weak drive matching original X3 behavior
     0x20, 0x03, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 const uint8_t lut_x3_bw_gray[] PROGMEM = {
-    // Light gray: VS=0x80 → VDL(3),GND,GND,GND — subtle pulse (sub-phase A, TP0=3)
+    // State 10 (medium gray): single phase, moderate drive matching original X3 behavior
     0x80, 0x03, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 const uint8_t lut_x3_wb_gray[] PROGMEM = {
-    // Active GND hold: VS=0x00 → all GND, matching timing
-    0x00, 0x03, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // State 01 (light gray): single phase, X4 VS[0] = 0x54 — never selected
+    0x54, 0x03, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 const uint8_t lut_x3_bb_gray[] PROGMEM = {
-    // Active GND hold: VS=0x00 → all GND, matching timing
+    // State 00 (no change): VS = 0x00 — pixels stay at their existing BW state
     0x00, 0x03, 0x02, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// X3 stock image-write LUTs
+// X3 stock image-write LUTs — extracted from OEM firmware
+// V5.1.6-X3-EN-PROD-0304_.bin at offset 0x433d40.
+//
+// Byte-for-byte equivalent to the X4 lut_factory_quality VS patterns,
+// repacked into the X3 controller's 5-cell layout. Each cell drives one
+// of the four 2-bit grey states selected by the (RAM 0x10, RAM 0x13) bit
+// pair on a per-pixel basis:
+//   BB (state 00): black drive
+//   BW (state 01): dark grey drive
+//   WB (state 10): light grey drive
+//   WW (state 11): white drive
+// VCOM provides the common electrode modulation across all transitions.
+//
+// Used by displayBuffer() for OEM full-sync image refresh, and by
+// displayGrayBuffer() for 4-level grayscale rendering.
 const uint8_t lut_x3_vcom_img[] PROGMEM = {
     0x00, 0x08, 0x0B, 0x02, 0x03, 0x01, 0x00, 0x0C, 0x02, 0x07, 0x02, 0x01, 0x00, 0x01,
     0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -182,28 +199,6 @@ const uint8_t lut_x3_wb_img[] PROGMEM = {
 const uint8_t lut_x3_bb_img[] PROGMEM = {
     0x00, 0x08, 0x0B, 0x02, 0x03, 0x01, 0x4A, 0x0C, 0x02, 0x07, 0x02, 0x01, 0x88, 0x01,
     0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-
-// X3 AA LUTs: fast partial-style set tuned to preserve X3 polarity behavior.
-const uint8_t lut_x3_vcom_fast[] PROGMEM = {
-    0x00, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const uint8_t lut_x3_ww_fast[] PROGMEM = {
-    0x60, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const uint8_t lut_x3_bw_fast[] PROGMEM = {
-    0x20, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const uint8_t lut_x3_wb_fast[] PROGMEM = {
-    0x10, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const uint8_t lut_x3_bb_fast[] PROGMEM = {
-    0x90, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 void EInkDisplay::setDisplayDimensions(uint16_t width, uint16_t height) {
@@ -321,7 +316,7 @@ void EInkDisplay::begin() {
 
   // Initialize SPI with custom pins
   SPI.begin(_sclk, -1, _mosi, _cs);
-  const uint32_t spiHz = _x3Mode ? 10000000 : 40000000;
+  const uint32_t spiHz = _x3Mode ? 16000000 : 40000000;
   spiSettings = SPISettings(spiHz, MSBFIRST, SPI_MODE0);
   if (Serial) Serial.printf("[%lu]   SPI initialized at %lu Hz, Mode 0\n", millis(), spiHz);
 
@@ -478,16 +473,6 @@ void EInkDisplay::initDisplayController() {
     sendData(0x09);
     sendCommand(0xE1);
     sendData(0x02);
-    sendCommand(0x20);
-    sendData(lut_x3_vcom_full, 42);
-    sendCommand(0x21);
-    sendData(lut_x3_ww_full, 42);
-    sendCommand(0x22);
-    sendData(lut_x3_bw_full, 42);
-    sendCommand(0x23);
-    sendData(lut_x3_wb_full, 42);
-    sendCommand(0x24);
-    sendData(lut_x3_bb_full, 42);
     isScreenOn = false;
     return;
   }
@@ -674,7 +659,40 @@ void EInkDisplay::grayscaleRevert() {
 
   inGrayscaleMode = false;
 
-  // Load the revert LUT
+  if (_x3Mode) {
+    // X3: load the _full bank (differential BW) and trigger — this overwrites
+    // the gray bank in the LUT registers and drives all pixels back to clean
+    // BW states, equivalent to the X4's lut_grayscale_revert pass.
+    auto sendCommandDataX3 = [&](uint8_t cmd, const uint8_t* data, uint16_t len) {
+      SPI.beginTransaction(spiSettings);
+      digitalWrite(_cs, LOW);
+      digitalWrite(_dc, LOW);
+      SPI.transfer(cmd);
+      if (len > 0 && data != nullptr) {
+        digitalWrite(_dc, HIGH);
+        SPI.writeBytes(data, len);
+      }
+      digitalWrite(_cs, HIGH);
+      SPI.endTransaction();
+    };
+    sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
+    sendCommandDataX3(0x21, lut_x3_ww_full, 42);
+    sendCommandDataX3(0x22, lut_x3_bw_full, 42);
+    sendCommandDataX3(0x23, lut_x3_wb_full, 42);
+    sendCommandDataX3(0x24, lut_x3_bb_full, 42);
+    uint8_t d[2] = {0x29, 0x07};
+    sendCommandDataX3(0x50, d, 2);
+    if (!isScreenOn) {
+      sendCommand(0x04);
+      waitForRefresh(" X3_CMD04(revert)");
+      isScreenOn = true;
+    }
+    sendCommand(0x12);
+    waitForRefresh(" X3_CMD12(revert)");
+    return;
+  }
+
+  // X4: load the revert LUT and fast refresh
   setCustomLUT(true, lut_grayscale_revert);
   refreshDisplay(FAST_REFRESH);
   setCustomLUT(false);
@@ -687,17 +705,26 @@ void EInkDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) {
   }
 
   if (_x3Mode) {
-    // X3 single-pass AA: write LSB plane to old-data RAM.
+    // X3 grayscale: write LSB plane raw to RED RAM (0x10).
+    // The GfxRenderer GRAY2_LSB pass already encodes plane bits in the
+    // convention the OEM lut_x3_*_img bank was tuned for, so no inversion
+    // is needed here (unlike the OEM image-write path which writes a
+    // BW-convention framebuffer and inverts on the way to RAM).
     uint8_t row[128];
     auto sendMirroredPlane = [&](const uint8_t* plane) {
+      SPI.beginTransaction(spiSettings);
+      digitalWrite(_dc, HIGH);
+      digitalWrite(_cs, LOW);
       for (uint16_t y = 0; y < displayHeight; y++) {
         const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
         const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
         for (uint16_t x = 0; x < displayWidthBytes; x++) {
           row[x] = src[x];
         }
-        sendData(row, displayWidthBytes);
+        SPI.writeBytes(row, displayWidthBytes);
       }
+      digitalWrite(_cs, HIGH);
+      SPI.endTransaction();
     };
 
     sendCommand(0x10);
@@ -719,16 +746,23 @@ void EInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) {
       return;
     }
 
+    // X3 grayscale: write MSB plane raw to BW RAM (0x13). See
+    // copyGrayscaleLsbBuffers above for the no-inversion rationale.
     uint8_t row[128];
     auto sendMirroredPlane = [&](const uint8_t* plane) {
+      SPI.beginTransaction(spiSettings);
+      digitalWrite(_dc, HIGH);
+      digitalWrite(_cs, LOW);
       for (uint16_t y = 0; y < displayHeight; y++) {
         const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
         const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
         for (uint16_t x = 0; x < displayWidthBytes; x++) {
           row[x] = src[x];
         }
-        sendData(row, displayWidthBytes);
+        SPI.writeBytes(row, displayWidthBytes);
       }
+      digitalWrite(_cs, HIGH);
+      SPI.endTransaction();
     };
 
     sendCommand(0x13);
@@ -764,14 +798,19 @@ void EInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
 
     uint8_t row[128];
     auto sendMirroredPlane = [&](const uint8_t* plane, bool invertBits) {
+      SPI.beginTransaction(spiSettings);
+      digitalWrite(_dc, HIGH);
+      digitalWrite(_cs, LOW);
       for (uint16_t y = 0; y < displayHeight; y++) {
         const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
         const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
         for (uint16_t x = 0; x < displayWidthBytes; x++) {
           row[x] = invertBits ? static_cast<uint8_t>(~src[x]) : src[x];
         }
-        sendData(row, displayWidthBytes);
+        SPI.writeBytes(row, displayWidthBytes);
       }
+      digitalWrite(_cs, HIGH);
+      SPI.endTransaction();
     };
 
     // Rebase both X3 planes from restored BW buffer so next differential update
@@ -830,14 +869,19 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       sendCommandDataX3(cmd, d, 2);
     };
     auto sendMirroredPlane = [&](const uint8_t* plane, bool invertBits) {
+      SPI.beginTransaction(spiSettings);
+      digitalWrite(_dc, HIGH);
+      digitalWrite(_cs, LOW);
       for (uint16_t y = 0; y < displayHeight; y++) {
         const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
         const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
         for (uint16_t x = 0; x < displayWidthBytes; x++) {
           row[x] = invertBits ? static_cast<uint8_t>(~src[x]) : src[x];
         }
-        sendData(row, displayWidthBytes);
+        SPI.writeBytes(row, displayWidthBytes);
       }
+      digitalWrite(_cs, HIGH);
+      SPI.endTransaction();
     };
 
     const bool forcedFullSync = _x3ForceFullSyncNext;
@@ -849,8 +893,11 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     }
     _x3GrayState.lastBaseWasPartial = !doFullSync;
 
+    // Always use the OEM img bank — the only LUT in the stock firmware.
+    // Full sync loads it explicitly; fast diff inherits from the last full
+    // sync (the controller retains the bank between triggers), mirroring
+    // the X4 path which never loads a custom LUT for page turns at all.
     if (doFullSync) {
-      // Full sync: img LUTs, inverted data to both RAMs
       sendCommandDataX3(0x20, lut_x3_vcom_img, 42);
       sendCommandDataX3(0x21, lut_x3_ww_img, 42);
       sendCommandDataX3(0x22, lut_x3_bw_img, 42);
@@ -864,14 +911,14 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
 
       sendCommandDataByteX3(0x50, 0xA9, 0x07);
     } else {
-      // Fast differential: full LUTs, RED RAM (0x10) retains previous frame
+      // Fast differential: load _full bank to overwrite any absolute-mode
+      // LUT left in the registers from a prior full sync or grayscale render.
       sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
       sendCommandDataX3(0x21, lut_x3_ww_full, 42);
       sendCommandDataX3(0x22, lut_x3_bw_full, 42);
       sendCommandDataX3(0x23, lut_x3_wb_full, 42);
       sendCommandDataX3(0x24, lut_x3_bb_full, 42);
 
-      // Write only new data to 0x13; controller diffs against 0x10
       sendCommand(0x13);
       sendMirroredPlane(frameBuffer, false);
 
@@ -1066,8 +1113,14 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
 
 void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const unsigned char* lut, const bool factoryMode) {
   if (_x3Mode) {
-    // X3 AA pipeline: LSB->0x10 + MSB->0x13, trigger 0x12 with X3 LUT bank.
+    // X3 uses a different command set from X4 — command bytes 0x20-0x22 are
+    // LUT registers on X3 but CTRL/activation commands on X4. The X4 path
+    // (setCustomLUT + refreshDisplay) cannot be used on X3.
     drawGrayscale = false;
+    // Skip grayscaleRevert on X3 — the next fast-diff page turn loads _full
+    // bank and drives all pixels to clean BW, handling cleanup naturally.
+    // On X4, grayscaleRevert is cheap (single LUT + CTRL2 fast refresh).
+    // On X3, it's an entire extra display refresh cycle at half the SPI speed.
     inGrayscaleMode = false;
 
     if (!_x3GrayState.lsbValid) {
@@ -1090,32 +1143,24 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const unsigned cha
       const uint8_t d[2] = {d0, d1};
       sendCommandDataX3(cmd, d, 2);
     };
-    uint8_t row[128];
-    auto sendMirroredPlane = [&](const uint8_t* plane, bool invertBits) {
-      for (uint16_t y = 0; y < displayHeight; y++) {
-        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
-        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
-        for (uint16_t x = 0; x < displayWidthBytes; x++) {
-          row[x] = invertBits ? static_cast<uint8_t>(~src[x]) : src[x];
-        }
-        sendData(row, displayWidthBytes);
-      }
-    };
 
-    const uint8_t* vcom = lut_x3_vcom_gray;
-    const uint8_t* ww = lut_x3_ww_gray;
-    const uint8_t* bw = lut_x3_bw_gray;
-    const uint8_t* wb = lut_x3_wb_gray;
-    const uint8_t* bb = lut_x3_bb_gray;
-    uint8_t dataInterval0 = 0x29;
-    uint8_t dataInterval1 = 0x07;
-    if (Serial) Serial.printf("[%lu]   X3_GRAY_MODE=gray_tuned\n", millis());
-    sendCommandDataX3(0x20, vcom, 42);
-    sendCommandDataX3(0x21, ww, 42);
-    sendCommandDataX3(0x22, bw, 42);
-    sendCommandDataX3(0x23, wb, 42);
-    sendCommandDataX3(0x24, bb, 42);
-    sendCommandDataByteX3(0x50, dataInterval0, dataInterval1);
+    if (factoryMode) {
+      if (Serial) Serial.printf("[%lu]   X3_GRAY_MODE=oem_img\n", millis());
+      sendCommandDataX3(0x20, lut_x3_vcom_img, 42);
+      sendCommandDataX3(0x21, lut_x3_ww_img, 42);
+      sendCommandDataX3(0x22, lut_x3_bw_img, 42);
+      sendCommandDataX3(0x23, lut_x3_wb_img, 42);
+      sendCommandDataX3(0x24, lut_x3_bb_img, 42);
+      sendCommandDataByteX3(0x50, 0xA9, 0x07);
+    } else {
+      if (Serial) Serial.printf("[%lu]   X3_GRAY_MODE=diff_gray\n", millis());
+      sendCommandDataX3(0x20, lut_x3_vcom_gray, 42);
+      sendCommandDataX3(0x21, lut_x3_ww_gray, 42);
+      sendCommandDataX3(0x22, lut_x3_bw_gray, 42);
+      sendCommandDataX3(0x23, lut_x3_wb_gray, 42);
+      sendCommandDataX3(0x24, lut_x3_bb_gray, 42);
+      sendCommandDataByteX3(0x50, 0x29, 0x07);
+    }
 
     if (!isScreenOn) {
       sendCommand(0x04);
@@ -1132,8 +1177,6 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const unsigned cha
       isScreenOn = false;
     }
 
-    // RAM baseline is re-established from restored BW buffer by
-    // cleanupGrayscaleBuffers() after this function returns.
     _x3RedRamSynced = false;
     _x3ForceFullSyncNext = false;
     _x3ForcedConditionPassesNext = 0;
