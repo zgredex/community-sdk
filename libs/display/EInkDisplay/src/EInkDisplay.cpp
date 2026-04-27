@@ -442,8 +442,8 @@ void EInkDisplay::initDisplayController() {
 #ifndef X3_USE_X4_INIT
   if (_x3Mode) {
     sendCommand(0x00);
-    sendData(0x3F);
-    sendData(0x08);
+    sendData(0x3F);  // OEM value
+    sendData(0x0A);  // OEM value (was 0x08)
     sendCommand(0x61);
     sendData(0x03);
     sendData(0x18);
@@ -455,7 +455,7 @@ void EInkDisplay::initDisplayController() {
     sendData(0x00);
     sendData(0x00);
     sendCommand(0x03);
-    sendData(0x1D);
+    sendData(0x20);  // OEM value (was 0x1D)
     sendCommand(0x01);
     sendData(0x07);
     sendData(0x17);
@@ -463,7 +463,7 @@ void EInkDisplay::initDisplayController() {
     sendData(0x3F);
     sendData(0x17);
     sendCommand(0x82);
-    sendData(0x1D);
+    sendData(0x24);  // OEM value (was 0x1D)
     sendCommand(0x06);
     sendData(0x25);
     sendData(0x25);
@@ -706,29 +706,26 @@ void EInkDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) {
 
   if (_x3Mode) {
     // X3 grayscale: write LSB plane raw to RED RAM (0x10).
-    // The GfxRenderer GRAY2_LSB pass already encodes plane bits in the
-    // convention the OEM lut_x3_*_img bank was tuned for, so no inversion
-    // is needed here (unlike the OEM image-write path which writes a
-    // BW-convention framebuffer and inverts on the way to RAM).
-    uint8_t row[128];
-    auto sendMirroredPlane = [&](const uint8_t* plane) {
-      SPI.beginTransaction(spiSettings);
-      digitalWrite(_dc, HIGH);
-      digitalWrite(_cs, LOW);
-      for (uint16_t y = 0; y < displayHeight; y++) {
-        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
-        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
-        for (uint16_t x = 0; x < displayWidthBytes; x++) {
-          row[x] = src[x];
-        }
-        SPI.writeBytes(row, displayWidthBytes);
-      }
-      digitalWrite(_cs, HIGH);
-      SPI.endTransaction();
-    };
-
+    // Y-flip in-place, bulk send, Y-flip back. The const_cast is safe because
+    // the buffer is fully restored before returning.
+    auto* buf = const_cast<uint8_t*>(lsbBuffer);
+    uint8_t rowTmp[128];
+    for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+      uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+      uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+      memcpy(rowTmp, rowA, displayWidthBytes);
+      memcpy(rowA, rowB, displayWidthBytes);
+      memcpy(rowB, rowTmp, displayWidthBytes);
+    }
     sendCommand(0x10);
-    sendMirroredPlane(lsbBuffer);
+    sendData(buf, static_cast<uint16_t>(bufferSize));
+    for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+      uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+      uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+      memcpy(rowTmp, rowA, displayWidthBytes);
+      memcpy(rowA, rowB, displayWidthBytes);
+      memcpy(rowB, rowTmp, displayWidthBytes);
+    }
     _x3GrayState.lsbValid = true;
     return;
   }
@@ -746,27 +743,25 @@ void EInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) {
       return;
     }
 
-    // X3 grayscale: write MSB plane raw to BW RAM (0x13). See
-    // copyGrayscaleLsbBuffers above for the no-inversion rationale.
-    uint8_t row[128];
-    auto sendMirroredPlane = [&](const uint8_t* plane) {
-      SPI.beginTransaction(spiSettings);
-      digitalWrite(_dc, HIGH);
-      digitalWrite(_cs, LOW);
-      for (uint16_t y = 0; y < displayHeight; y++) {
-        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
-        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
-        for (uint16_t x = 0; x < displayWidthBytes; x++) {
-          row[x] = src[x];
-        }
-        SPI.writeBytes(row, displayWidthBytes);
-      }
-      digitalWrite(_cs, HIGH);
-      SPI.endTransaction();
-    };
-
+    // X3 grayscale: write MSB plane raw to BW RAM (0x13).
+    auto* buf = const_cast<uint8_t*>(msbBuffer);
+    uint8_t rowTmp[128];
+    for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+      uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+      uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+      memcpy(rowTmp, rowA, displayWidthBytes);
+      memcpy(rowA, rowB, displayWidthBytes);
+      memcpy(rowB, rowTmp, displayWidthBytes);
+    }
     sendCommand(0x13);
-    sendMirroredPlane(msbBuffer);
+    sendData(buf, static_cast<uint16_t>(bufferSize));
+    for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+      uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+      uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+      memcpy(rowTmp, rowA, displayWidthBytes);
+      memcpy(rowA, rowB, displayWidthBytes);
+      memcpy(rowB, rowTmp, displayWidthBytes);
+    }
     return;
   }
   setRamArea(0, 0, displayWidth, displayHeight);
@@ -796,29 +791,28 @@ void EInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
       return;
     }
 
-    uint8_t row[128];
-    auto sendMirroredPlane = [&](const uint8_t* plane, bool invertBits) {
-      SPI.beginTransaction(spiSettings);
-      digitalWrite(_dc, HIGH);
-      digitalWrite(_cs, LOW);
-      for (uint16_t y = 0; y < displayHeight; y++) {
-        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
-        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
-        for (uint16_t x = 0; x < displayWidthBytes; x++) {
-          row[x] = invertBits ? static_cast<uint8_t>(~src[x]) : src[x];
-        }
-        SPI.writeBytes(row, displayWidthBytes);
-      }
-      digitalWrite(_cs, HIGH);
-      SPI.endTransaction();
-    };
-
-    // Rebase both X3 planes from restored BW buffer so next differential update
-    // compares from a coherent known state.
+    // Rebase both X3 planes from restored BW buffer. Y-flip once, send to
+    // both RAMs (same data), flip back.
+    auto* buf = const_cast<uint8_t*>(bwBuffer);
+    uint8_t rowTmp[128];
+    for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+      uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+      uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+      memcpy(rowTmp, rowA, displayWidthBytes);
+      memcpy(rowA, rowB, displayWidthBytes);
+      memcpy(rowB, rowTmp, displayWidthBytes);
+    }
     sendCommand(0x13);
-    sendMirroredPlane(bwBuffer, false);
+    sendData(buf, static_cast<uint16_t>(bufferSize));
     sendCommand(0x10);
-    sendMirroredPlane(bwBuffer, false);
+    sendData(buf, static_cast<uint16_t>(bufferSize));
+    for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+      uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+      uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+      memcpy(rowTmp, rowA, displayWidthBytes);
+      memcpy(rowA, rowB, displayWidthBytes);
+      memcpy(rowB, rowTmp, displayWidthBytes);
+    }
 
     _x3RedRamSynced = true;
     _x3ForceFullSyncNext = false;
@@ -851,7 +845,6 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     // On X3, treat HALF refresh as fast differential mode.
     // Reader uses HALF as a cadence hint, but forcing full here makes turns too slow.
     const bool fastMode = (mode != FULL_REFRESH);
-    uint8_t row[128];
     auto sendCommandDataX3 = [&](uint8_t cmd, const uint8_t* data, uint16_t len) {
       SPI.beginTransaction(spiSettings);
       digitalWrite(_cs, LOW);
@@ -868,20 +861,34 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       const uint8_t d[2] = {d0, d1};
       sendCommandDataX3(cmd, d, 2);
     };
-    auto sendMirroredPlane = [&](const uint8_t* plane, bool invertBits) {
-      SPI.beginTransaction(spiSettings);
-      digitalWrite(_dc, HIGH);
-      digitalWrite(_cs, LOW);
-      for (uint16_t y = 0; y < displayHeight; y++) {
-        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
-        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
-        for (uint16_t x = 0; x < displayWidthBytes; x++) {
-          row[x] = invertBits ? static_cast<uint8_t>(~src[x]) : src[x];
-        }
-        SPI.writeBytes(row, displayWidthBytes);
+    // Reverse row order of a buffer in-place (Y-flip). The X3 controller scans
+    // gates upward (UD=1) so the first byte sent maps to the bottom-left pixel.
+    // The framebuffer stores row 0 at offset 0 (top), so we reverse rows before
+    // sending and restore after. Uses a small stack row buffer (99 bytes for X3).
+    uint8_t rowTmp[128];
+    auto flipRowsInPlace = [&](uint8_t* buf) {
+      for (uint16_t top = 0, bot = displayHeight - 1; top < bot; top++, bot--) {
+        uint8_t* rowA = buf + static_cast<uint32_t>(top) * displayWidthBytes;
+        uint8_t* rowB = buf + static_cast<uint32_t>(bot) * displayWidthBytes;
+        memcpy(rowTmp, rowA, displayWidthBytes);
+        memcpy(rowA, rowB, displayWidthBytes);
+        memcpy(rowB, rowTmp, displayWidthBytes);
       }
-      digitalWrite(_cs, HIGH);
-      SPI.endTransaction();
+    };
+    auto invertBuffer = [&](uint8_t* buf) {
+      auto* p = reinterpret_cast<uint32_t*>(buf);
+      for (uint32_t i = 0; i < bufferSize / 4; i++) p[i] = ~p[i];
+    };
+    // Bulk-send an entire plane to the controller in one SPI transaction after
+    // Y-flipping in place, then restore. Optionally inverts all bits (for
+    // absolute-mode full sync). Reduces X3 from 528 SPI writeBytes calls to 1.
+    auto sendPlane = [&](uint8_t ramCmd, uint8_t* buf, bool invert) {
+      if (invert) invertBuffer(buf);
+      flipRowsInPlace(buf);
+      sendCommand(ramCmd);
+      sendData(buf, static_cast<uint16_t>(bufferSize));
+      flipRowsInPlace(buf);
+      if (invert) invertBuffer(buf);
     };
 
     const bool forcedFullSync = _x3ForceFullSyncNext;
@@ -893,10 +900,6 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     }
     _x3GrayState.lastBaseWasPartial = !doFullSync;
 
-    // Always use the OEM img bank — the only LUT in the stock firmware.
-    // Full sync loads it explicitly; fast diff inherits from the last full
-    // sync (the controller retains the bank between triggers), mirroring
-    // the X4 path which never loads a custom LUT for page turns at all.
     if (doFullSync) {
       sendCommandDataX3(0x20, lut_x3_vcom_img, 42);
       sendCommandDataX3(0x21, lut_x3_ww_img, 42);
@@ -904,23 +907,18 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       sendCommandDataX3(0x23, lut_x3_wb_img, 42);
       sendCommandDataX3(0x24, lut_x3_bb_img, 42);
 
-      sendCommand(0x13);
-      sendMirroredPlane(frameBuffer, true);
-      sendCommand(0x10);
-      sendMirroredPlane(frameBuffer, true);
+      sendPlane(0x13, frameBuffer, true);
+      sendPlane(0x10, frameBuffer, true);
 
       sendCommandDataByteX3(0x50, 0xA9, 0x07);
     } else {
-      // Fast differential: load _full bank to overwrite any absolute-mode
-      // LUT left in the registers from a prior full sync or grayscale render.
       sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
       sendCommandDataX3(0x21, lut_x3_ww_full, 42);
       sendCommandDataX3(0x22, lut_x3_bw_full, 42);
       sendCommandDataX3(0x23, lut_x3_wb_full, 42);
       sendCommandDataX3(0x24, lut_x3_bb_full, 42);
 
-      sendCommand(0x13);
-      sendMirroredPlane(frameBuffer, false);
+      sendPlane(0x13, frameBuffer, false);
 
       sendCommandDataByteX3(0x50, 0x29, 0x07);
     }
@@ -935,9 +933,6 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     sendCommand(0x12);
     waitForRefresh(" X3_CMD12");
 
-    // Power off analog rails immediately after refresh if requested,
-    // before RAM bookkeeping (which only needs SPI, not the charge pump).
-    // This mirrors X4 behavior where power-off is part of the refresh cycle.
     if (turnOffScreen) {
       sendCommand(0x02);
       waitForRefresh(" X3_CMD02_POWEROFF");
@@ -946,8 +941,6 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
 
     if (!fastMode) delay(200);
 
-    // One-time light settle after the first major full-sync improves early
-    // page-turn quality on X3 without paying the old 6-pass cost.
     uint8_t postConditionPasses = 0;
     if (doFullSync) {
       if (forcedFullSync) postConditionPasses = _x3ForcedConditionPassesNext;
@@ -975,8 +968,7 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
         if (Serial) Serial.printf("[%lu]   X3_OEM_COND %u/%u\n", millis(), static_cast<unsigned>(i + 1), static_cast<unsigned>(postConditionPasses));
         sendCommand(0x91);
         sendCommandDataX3(0x90, w, 9);
-        sendCommand(0x13);
-        sendMirroredPlane(frameBuffer, false);
+        sendPlane(0x13, frameBuffer, false);
         sendCommand(0x92);
         if (!isScreenOn) {
           sendCommand(0x04);
@@ -990,9 +982,7 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     }
 
     // Sync RED RAM (0x10) with non-inverted current frame for next fast diff.
-    // This is a controller memory write — doesn't need the charge pump.
-    sendCommand(0x10);
-    sendMirroredPlane(frameBuffer, false);
+    sendPlane(0x10, frameBuffer, false);
     _x3RedRamSynced = true;
 
     if (doFullSync && _x3InitialFullSyncsRemaining > 0) {
