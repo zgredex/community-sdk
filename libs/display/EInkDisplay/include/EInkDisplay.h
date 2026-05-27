@@ -52,13 +52,21 @@ class EInkDisplay {
   void setFramebuffer(const uint8_t* bwBuffer) const;
 
   void copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer);
-  void copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer);
-  void copyGrayscaleMsbBuffers(const uint8_t* msbBuffer);
+  // invert: stream the bit-inverse of each byte into RAM. Used by the Mode-1
+  // (0xC7) factory-gray path so our Mode-2 plane encoding (white=(1,1)) is
+  // rewritten to china's Mode-1 polarity (white=(0,0)) — see
+  // displayGrayBufferFactoryActivateMode1().
+  void copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer, bool invert = false);
+  void copyGrayscaleMsbBuffers(const uint8_t* msbBuffer, bool invert = false);
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   void cleanupGrayscaleBuffers(const uint8_t* bwBuffer);
 #endif
 
-  void displayBuffer(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
+  // loadTemp (#3): when true, OR the TEMP_LOAD bit (0x20) into a FAST_REFRESH so the
+  // controller re-reads the internal panel temperature for that BW partial (matches
+  // stock _updatePart = 0xFC). Default false — GUI/menu/EPUB FAST refreshes unchanged.
+  // Only the XTC 1-bit page path passes true.
+  void displayBuffer(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false, bool loadTemp = false);
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
   void displayGrayBuffer(bool turnOffScreen = false, const unsigned char* lut = nullptr, bool factoryMode = false);
@@ -69,6 +77,15 @@ class EInkDisplay {
   // See docs/v559-disassembly-findings.md.
   void displayGrayBufferFactorySetup(const unsigned char* lut);
   void displayGrayBufferFactoryActivate();
+  // Mode-1 (0xC7) factory-gray activation = china's Subsystem A path
+  // (ssdA_activateFire_C7 @420154ea). Fires CTRL2=0xC7 (Mode 1, no MODE_SELECT)
+  // which self-de-energizes the panel every page — no rails-on charge
+  // accumulation across a reading session. Requires the caller to have written
+  // BIT-INVERTED BW/RED planes (copyGrayscale*Buffers(.., invert=true)), because
+  // Mode-1 indexes the (BW,RED) planes inversely to our Mode-2 (0xCC) encoding
+  // (china's xth_packPixelToPlanes packs plane_bit = ~value_bit). Same LUT/setup
+  // as displayGrayBufferFactoryActivate(); only the fire byte + polarity differ.
+  void displayGrayBufferFactoryActivateMode1();
 
   // Stock-V5.5.9 byte-match preconditioning pass for factory-LUT sleep paths.
   // Fills frameBuffer with `color`, writes both BW and RED RAM, fires a full
@@ -78,7 +95,13 @@ class EInkDisplay {
   // X4 mode only; X3 falls back to displayBuffer(FULL_REFRESH, true).
   void displayBufferPrecondition(uint8_t color);
 
-  void refreshDisplay(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
+  void refreshDisplay(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false, bool loadTemp = false);
+
+  // #5a — Per-render controller re-init for factory-gray image paths (XTC pages).
+  // SOFT_RESET + temp + booster + driver-output + border + RAM window, matching
+  // stock's per-image 0x42015302. Does NOT auto-clear RAM. X4 only. Call before
+  // writing page content + a factory-gray render.
+  void reinitController();
 
   // Hint the X3 policy to run a one-shot full resync on next update.
   void requestResync(uint8_t settlePasses = 0);
@@ -148,6 +171,12 @@ class EInkDisplay {
   bool inGrayscaleMode;
   bool drawGrayscale;
   bool factoryGrayNeedsPowerOffOnDeepSleep = false;
+  // One-shot: set after a factory-gray (Mode-2) activation, which leaves the RED
+  // (old) RAM holding the gray planes. Forces the NEXT BW displayBuffer to HALF so
+  // RED RAM is re-synced — otherwise the first FAST differential diffs against the
+  // stale gray RED RAM and renders inverted/wrong (XTC -> menu). Decouples the
+  // rebase from isScreenOn (which must stay true so deepSleep runs the 0x03).
+  bool factoryGrayPendingBwRebase = false;
 
   // Low-level display control
   void resetDisplay();
@@ -160,7 +189,7 @@ class EInkDisplay {
 
   // Low-level display operations
   void setRamArea(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
-  void writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size);
+  void writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size, bool invert = false);
 };
 
 // Factory LUTs extracted from firmware V3.1.9_CH_X4_0117.bin.

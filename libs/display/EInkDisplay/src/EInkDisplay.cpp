@@ -42,6 +42,36 @@ static constexpr uint8_t DISPLAY_UPDATE_FACTORY_GRAY =
     DISPLAY_UPDATE_CLOCK_ON | DISPLAY_UPDATE_ANALOG_ON | DISPLAY_UPDATE_MODE_SELECT | DISPLAY_UPDATE_DISPLAY_START;
 static constexpr uint8_t DISPLAY_UPDATE_POWER_OFF =
     DISPLAY_UPDATE_CLOCK_ON | DISPLAY_UPDATE_ANALOG_OFF_PHASE | DISPLAY_UPDATE_CLOCK_OFF;
+// #5b — power-cycling factory-gray fire = 0xCF (Mode2 + power-off). The DEFAULT
+// for all factory-gray activations: drives the custom factory LUT, then drops the
+// rails (ANALOG_OFF | CLOCK_OFF), so no residual charge persists across renders
+// (the anti-ghost goal).
+//
+// CRITICAL — keep MODE_SELECT (0x08) set. Our renderer encodes 4-level gray as a
+// 2-bit (BW,RED) plane pair (white = both bits set; see GfxRenderer::drawPixel),
+// which the controller only combines into LUT0..3 in Mode 2 (MODE_SELECT). Stock
+// fires Mode 1 (0xC7, no MODE_SELECT) but with planes pre-encoded for Mode 1 in
+// the file (its RAM writers are pure blits). Firing Mode 1 with our Mode-2
+// encoding mis-maps the planes → white pixels miss LUT3 → uniform graying on
+// sleep / viewers / covers. So we keep Mode 2 and add the power-off bits:
+//   0xCF = CLOCK_ON | ANALOG_ON | MODE_SELECT | DISPLAY_START | ANALOG_OFF | CLOCK_OFF
+// = DISPLAY_UPDATE_FACTORY_GRAY (0xCC) | 0x03. One complete activation (clock on
+// through the sequence → no BUSY stall). The old rails-on 0xCC is kept for ref.
+static constexpr uint8_t DISPLAY_UPDATE_FACTORY_GRAY_PWRCYCLE =
+    DISPLAY_UPDATE_FACTORY_GRAY | DISPLAY_UPDATE_ANALOG_OFF_PHASE | DISPLAY_UPDATE_CLOCK_OFF;  // 0xCF
+
+// Mode-1 factory-gray fire = china Subsystem A (ssdA_activateFire_C7 @420154ea):
+//   0xC7 = CLOCK_ON | ANALOG_ON | DISPLAY_START | ANALOG_OFF | CLOCK_OFF
+// NO MODE_SELECT (Mode 1). Drives the custom factory LUT, then self-de-energizes
+// the panel (drops the rails) in the SAME activation — exactly how china ends
+// every XTC/image/sleep render, so no charge accumulates across a reading
+// session. Mode-1 indexes the (BW,RED) planes inversely to Mode-2 (0xCC), so the
+// caller must write BIT-INVERTED planes (china's xth_packPixelToPlanes @4200b298
+// packs plane_bit = ~value_bit; white = (0,0)). LUT bytes match china byte-for-
+// byte (lut_factory_fast == 3c585d68, lut_factory_quality == 3c18e634).
+static constexpr uint8_t DISPLAY_UPDATE_FACTORY_GRAY_MODE1 =
+    DISPLAY_UPDATE_CLOCK_ON | DISPLAY_UPDATE_ANALOG_ON | DISPLAY_UPDATE_DISPLAY_START |
+    DISPLAY_UPDATE_ANALOG_OFF_PHASE | DISPLAY_UPDATE_CLOCK_OFF;  // 0xC7
 
 // LUT and voltage settings
 #define CMD_WRITE_LUT 0x32       // Write LUT
@@ -59,6 +89,12 @@ static constexpr uint8_t DISPLAY_UPDATE_POWER_OFF =
 
 // Power management
 #define CMD_DEEP_SLEEP 0x10  // Deep sleep
+
+// #2 — settle delay (ms) after the factory-gray sleep power-off (CTRL2=0x03)
+// before VCC is cut. Replicates stock V5.6.33's 250 ms (0xfa) wait in its
+// deep-sleep entry (firmware 0x4201a6ee). Lets driver charge bleed off with
+// rails already off so the VCC drop hits a quiescent panel → no gray smear.
+static constexpr uint32_t SLEEP_POWEROFF_SETTLE_MS = 250;
 
 // Custom LUT for fast refresh (differential 3-pass mode, 12 frames)
 const unsigned char lut_grayscale[] PROGMEM = {
@@ -568,6 +604,45 @@ void EInkDisplay::initDisplayController() {
   if (Serial) Serial.printf("[%lu]   SSD1677 controller initialized\n", millis());
 }
 
+// #5a — Per-render controller re-init for factory-gray image paths (XTC pages).
+// Replicates stock V5.6.33's firmware 0x42015302, which it runs at the START of
+// EVERY standalone image/comic render: SOFT_RESET → temp sensor → booster →
+// driver-output → border → RAM window. This clears the controller's internal
+// charge/waveform state between pages so nothing carries over (anti-ghost).
+// Unlike initDisplayController() it does NOT auto-clear RAM to white (the caller
+// writes the page content immediately after). X4 only.
+void EInkDisplay::reinitController() {
+  if (_x3Mode) return;
+  const uint8_t TEMP_SENSOR_INTERNAL = 0x80;
+
+  sendCommand(CMD_SOFT_RESET);
+  waitWhileBusy(" reinit SOFT_RESET");
+
+  sendCommand(CMD_TEMP_SENSOR_CONTROL);
+  sendData(TEMP_SENSOR_INTERNAL);
+
+  sendCommand(CMD_BOOSTER_SOFT_START);
+  sendData(0xAE);
+  sendData(0xC7);
+  sendData(0xC3);
+  sendData(0xC0);
+  sendData(0x80);
+
+  sendCommand(CMD_DRIVER_OUTPUT_CONTROL);
+  sendData((displayHeight - 1) % 256);
+  sendData((displayHeight - 1) / 256);
+  sendData(0x02);
+
+  sendCommand(CMD_BORDER_WAVEFORM);
+  sendData(0x80);
+
+  setRamArea(0, 0, displayWidth, displayHeight);
+
+  // SOFT_RESET clears the custom-LUT-loaded flag in the controller; reflect it.
+  customLutActive = false;
+  isScreenOn = false;
+}
+
 void EInkDisplay::setRamArea(const uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
   constexpr uint8_t DATA_ENTRY_X_INC_Y_DEC = 0x01;
 
@@ -668,13 +743,28 @@ void EInkDisplay::drawImageTransparent(const uint8_t* imageData, const uint16_t 
   if (Serial) Serial.printf("[%lu]   Transparent image drawn to frame buffer\n", millis());
 }
 
-void EInkDisplay::writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size) {
+void EInkDisplay::writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size, bool invert) {
   const char* bufferName = (ramBuffer == CMD_WRITE_RAM_BW) ? "BW" : "RED";
   const unsigned long startTime = millis();
   if (Serial) Serial.printf("[%lu]   Writing frame buffer to %s RAM (%lu bytes)...\n", startTime, bufferName, size);
 
   sendCommand(ramBuffer);
-  sendData(data, size);
+  if (!invert) {
+    sendData(data, size);
+  } else {
+    // Stream the bit-inverse without a second 48 KB buffer (china Mode-1 plane
+    // polarity, see displayGrayBufferFactoryActivateMode1). Small stack chunk
+    // keeps the local well under the 256-byte stack guideline.
+    uint8_t chunk[128];
+    uint32_t offset = 0;
+    while (offset < size) {
+      uint32_t n = size - offset;
+      if (n > sizeof(chunk)) n = sizeof(chunk);
+      for (uint32_t i = 0; i < n; i++) chunk[i] = static_cast<uint8_t>(~data[offset + i]);
+      sendData(chunk, n);
+      offset += n;
+    }
+  }
 
   const unsigned long duration = millis() - startTime;
   if (Serial) Serial.printf("[%lu]   %s RAM write complete (%lu ms)\n", millis(), bufferName, duration);
@@ -744,7 +834,7 @@ void EInkDisplay::grayscaleRevert() {
   setCustomLUT(false);
 }
 
-void EInkDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) {
+void EInkDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer, bool invert) {
   if (!lsbBuffer) {
     _x3GrayState.lsbValid = false;
     return;
@@ -776,10 +866,10 @@ void EInkDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) {
     return;
   }
   setRamArea(0, 0, displayWidth, displayHeight);
-  writeRamBuffer(CMD_WRITE_RAM_BW, lsbBuffer, bufferSize);
+  writeRamBuffer(CMD_WRITE_RAM_BW, lsbBuffer, bufferSize, invert);
 }
 
-void EInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) {
+void EInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer, bool invert) {
   if (!msbBuffer) {
     return;
   }
@@ -811,7 +901,7 @@ void EInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) {
     return;
   }
   setRamArea(0, 0, displayWidth, displayHeight);
-  writeRamBuffer(CMD_WRITE_RAM_RED, msbBuffer, bufferSize);
+  writeRamBuffer(CMD_WRITE_RAM_RED, msbBuffer, bufferSize, invert);
 }
 
 void EInkDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer) {
@@ -871,10 +961,14 @@ void EInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
 }
 #endif
 
-void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
-  if (!_x3Mode && !isScreenOn && !turnOffScreen) {
-    // Force half refresh if screen is off (non-X3 only)
+void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen, const bool loadTemp) {
+  if (!_x3Mode && !turnOffScreen && (!isScreenOn || factoryGrayPendingBwRebase)) {
+    // Force half refresh when the screen is off, OR for the first BW refresh after
+    // a factory-gray render (RED/old RAM still holds the gray planes). HALF
+    // re-syncs RED RAM so the next FAST differential isn't compared against stale
+    // gray data (which renders inverted). One-shot — clear the rebase flag.
     mode = HALF_REFRESH;
+    factoryGrayPendingBwRebase = false;
   }
 
   // If currently in grayscale mode, revert first to black/white.
@@ -1064,7 +1158,7 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
 #endif
 
   // Refresh the display
-  refreshDisplay(mode, turnOffScreen);
+  refreshDisplay(mode, turnOffScreen, loadTemp);
 
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   // In single buffer mode always sync RED RAM after refresh to prepare for next
@@ -1261,13 +1355,13 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const unsigned cha
     // (BYPASS_RED) which would ignore RED RAM and break 4-level grayscale.
     sendCommand(CMD_DISPLAY_UPDATE_CTRL1);
     sendData(CTRL1_NORMAL);  // 0x00
-    // Keep rails on after the factory gray paint. Running ANALOG_OFF/CLOCK_OFF in
-    // the same activation can disturb settled gray particles and reintroduce smear.
+    // #5b: match factory FW — fire 0xC7 (drives the LUT then drops the rails).
+    // See displayGrayBufferFactoryActivate(). (Was 0xCC, rails-on.)
     sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
-    sendData(DISPLAY_UPDATE_FACTORY_GRAY);
+    sendData(DISPLAY_UPDATE_FACTORY_GRAY_PWRCYCLE);  // 0xC7
     sendCommand(CMD_MASTER_ACTIVATION);
     waitWhileBusy("factory_gray");
-    isScreenOn = true;
+    isScreenOn = false;  // 0xC7 leaves the rails off
     factoryGrayNeedsPowerOffOnDeepSleep = true;
   } else {
     refreshDisplay(FAST_REFRESH, turnOffScreen);
@@ -1281,7 +1375,7 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const unsigned cha
   }
 }
 
-void EInkDisplay::refreshDisplay(const RefreshMode mode, const bool turnOffScreen) {
+void EInkDisplay::refreshDisplay(const RefreshMode mode, const bool turnOffScreen, const bool loadTemp) {
   if (_x3Mode) {
     displayBuffer(mode, turnOffScreen);
     return;
@@ -1329,6 +1423,10 @@ void EInkDisplay::refreshDisplay(const RefreshMode mode, const bool turnOffScree
     displayMode |= 0xD4;
   } else {  // FAST_REFRESH
     displayMode |= customLutActive ? 0x0C : 0x1C;
+    // #3: XTC 1-bit page path opts into TEMP_LOAD so the OTP BW waveform is
+    // temperature-compensated per turn (matches stock _updatePart = 0xFC). Only
+    // applied to the non-custom-LUT case; GUI/menu callers pass loadTemp=false.
+    if (loadTemp && !customLutActive) displayMode |= 0x20;
   }
 
   // Power on and refresh display
@@ -1438,11 +1536,28 @@ void EInkDisplay::displayGrayBufferFactoryActivate() {
   sendCommand(CMD_DISPLAY_UPDATE_CTRL1);
   sendData(CTRL1_NORMAL);  // 0x00
   sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
-  sendData(DISPLAY_UPDATE_FACTORY_GRAY);  // 0xCC
+  // Fire 0xCC — Mode2 (MODE_SELECT: our 2-bit BW+RED gray encoding maps to
+  // LUT0..3) + DISPLAY_START, and KEEP THE RAILS ON (no ANALOG_OFF/CLOCK_OFF).
+  // RE-proven (docs/v5633-display-lut-disassembly.md dig round 11): stock NEVER
+  // bundles a power-off into a Mode-2 content drive — every Mode-2 content fire
+  // (0xCC/0xFC) is rails-on; the only Mode-2+power-off (0xCF) is the localGC
+  // nudge that drives almost nothing. Cutting rails inside a Mode-2 gray
+  // activation (0xCF / the old 0xC7 Mode-1 mismatch) freezes the flat white
+  // margins mid-settle → grey smear that accumulates page-to-page (XTC/cover/
+  // viewer). Rails-on lets VCOM settle each frame → clean, matching stock's
+  // GUI gray engine. The sleep anti-ghost de-energize is a SEPARATE controlled
+  // step done by deepSleep() (#2: border 0x80 -> CTRL2 0x03 -> activate ->
+  // 250ms), which runs only while isScreenOn (clock alive) so it never stalls —
+  // exactly how stock powers off its built-in (Subsystem-B) sleep screen.
+  sendData(DISPLAY_UPDATE_FACTORY_GRAY);  // 0xCC, rails-on
   sendCommand(CMD_MASTER_ACTIVATION);
   waitWhileBusy("factory_gray");
-  isScreenOn = true;
+  isScreenOn = true;  // 0xCC leaves the rails on; deepSleep(#2) does the 0x03 power-off for sleep
   factoryGrayNeedsPowerOffOnDeepSleep = true;
+  // Mode-2 left the RED (old) RAM holding the gray planes. Force the next BW
+  // displayBuffer to HALF (rebase RED RAM) so it isn't FAST-diffed against stale
+  // gray → inverted menu on XTC->home. Decoupled from isScreenOn (kept true above).
+  factoryGrayPendingBwRebase = true;
   // EXPERIMENT (stock V5.5.9 byte-match): do NOT restore VCOM here. Stock
   // leaves the chip's VCOM register at whatever the LUT wrote (0x22 with
   // the current voltage-bytes experiment) and lets GPIO13-LOW kill VCC.
@@ -1455,17 +1570,65 @@ void EInkDisplay::displayGrayBufferFactoryActivate() {
   customLutActive = false;
 }
 
+// Mode-1 (0xC7) factory-gray activation — china Subsystem A (ssdA_activateFire_C7
+// @420154ea). Same setup/LUT as displayGrayBufferFactoryActivate(); the caller
+// must have written BIT-INVERTED BW/RED planes (copyGrayscale*Buffers invert=true)
+// because Mode-1 indexes the planes inversely to Mode-2's 0xCC. 0xC7 contains the
+// ANALOG_OFF | CLOCK_OFF bits, so it self-de-energizes the panel every render —
+// no rails-on charge accumulation across a reading session (the gray-blotch root
+// cause). See docs/v5633-display-lut-disassembly.md.
+void EInkDisplay::displayGrayBufferFactoryActivateMode1() {
+  if (_x3Mode) return;
+  // CRITICAL: reset CTRL1 to normal — a prior HALF_REFRESH leaves CTRL1=0x40
+  // (BYPASS_RED) which would ignore RED RAM and break 4-level grayscale.
+  sendCommand(CMD_DISPLAY_UPDATE_CTRL1);
+  sendData(CTRL1_NORMAL);  // 0x00
+  sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
+  sendData(DISPLAY_UPDATE_FACTORY_GRAY_MODE1);  // 0xC7 — Mode 1, self-de-energizing
+  sendCommand(CMD_MASTER_ACTIVATION);
+  waitWhileBusy("factory_gray_c7");
+  isScreenOn = false;  // 0xC7 dropped the rails (ANALOG_OFF | CLOCK_OFF) itself
+  // Rails are already off; the sleep path's #2 branch will skip the 0x03
+  // re-activation (isScreenOn==false) and just run the 250 ms settle before VCC
+  // cut — matching china's deepSleepEntry (@4201a6ee) after an image 0xC7.
+  factoryGrayNeedsPowerOffOnDeepSleep = true;
+  // Mode-1 left RED RAM holding the (inverted) gray plane; force the next BW
+  // displayBuffer to HALF to rebase RED RAM (same menu-inversion guard as 0xCC).
+  factoryGrayPendingBwRebase = true;
+  customLutActive = false;
+}
+
 void EInkDisplay::deepSleep(const bool powerDownDisplay) {
   if (Serial) Serial.printf("[%lu]   Preparing display for deep sleep...\n", millis());
 
   // First, power down the display properly.
-  if (isScreenOn && powerDownDisplay && factoryGrayNeedsPowerOffOnDeepSleep) {
-    // Match stock V5.5.9: after a factory-LUT render, do NOTHING before rails drop.
-    // No POWER_OFF activation, no CMD_DEEP_SLEEP. Stock simply lets GPIO13-LOW
-    // kill VCC with the panel still in its "factory waveform just finished, rails
-    // on" state. Any extra activation (POWER_OFF, ANALOG_OFF, even DEEP_SLEEP)
-    // disturbs the freshly-settled gray pixel cap charges and shows as ghosting
-    // when VCOM drops. See docs/v559-disassembly-findings.md.
+  if (powerDownDisplay && factoryGrayNeedsPowerOffOnDeepSleep) {
+    // #2 — Replicate stock V5.6.33 _powerOff (firmware 0x4208966a) + the 250 ms
+    // settle from its deep-sleep entry (0x4201a6ee), run BEFORE GPIO13 cuts VCC.
+    // Cutting VCC while the source/gate drivers are still energized dumps the
+    // half-driven charge unevenly → gray SMEAR. Stock de-energizes the drivers
+    // first, then settles, then drops power.
+    //   BORDER=0x80 ; CTRL2=0x03 (ANALOG_OFF|CLOCK_OFF) ; MASTER_ACTIVATION ; wait
+    // CTRL2=0x03 has NO DISPLAY_START bit → it performs no pixel drive, only the
+    // controller's analog/oscillator power-OFF phase. The 250 ms then lets charge
+    // bleed off with rails already off, so VCC drop hits a quiescent panel.
+    // Supersedes the old V5.5.9 "do nothing" hypothesis — see
+    // docs/v5633-display-lut-disassembly.md ★ ROOT CAUSE.
+    if (isScreenOn) {
+      // Rails still on (0xCC factory render). Run the controlled analog power-off.
+      // If #5b drove the render with 0xC7, the rails are already off (isScreenOn
+      // == false) so we skip re-activation (avoids a no-clock MASTER_ACTIVATION
+      // stall) and just settle below.
+      sendCommand(CMD_BORDER_WAVEFORM);
+      sendData(0x80);
+      sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
+      sendData(DISPLAY_UPDATE_ANALOG_OFF_PHASE | DISPLAY_UPDATE_CLOCK_OFF);  // 0x03
+      sendCommand(CMD_MASTER_ACTIVATION);
+      waitWhileBusy(" factory sleep power-off");
+    }
+    delay(SLEEP_POWEROFF_SETTLE_MS);  // settle with rails off before VCC drop (stock = 250 ms)
+    // No CMD_DEEP_SLEEP: stock relies on the VCC cut (GPIO13-LOW in
+    // HalPowerManager::startDeepSleep), matching the BW path's GPIO13 reliance.
     isScreenOn = false;
     factoryGrayNeedsPowerOffOnDeepSleep = false;
     return;
